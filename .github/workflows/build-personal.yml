@@ -139,36 +139,107 @@ jobs:
           -p:AppxPackageSigningEnabled=True `
           -p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT
 
-    - name: Create installation instructions
+    - name: Create one-click installer script
       shell: pwsh
       run: |
-        $instructions = @"
-        # Files Personal Build 安装说明
+        # 一键安装脚本
+        $installScript = @'
+        # Files Personal Build - 一键安装脚本
+        # 右键此文件 -> 使用 PowerShell 运行
         
-        ## 安装步骤
+        param([switch]$Uninstall)
         
-        ### 1. 安装证书（只需首次安装）
-        1. 双击 `FilesPersonalBuild.cer` 文件
-        2. 点击「安装证书」
-        3. 选择「本地计算机」，点击下一步（需要管理员权限）
-        4. 选择「将所有证书放入下列存储」
-        5. 点击「浏览」，选择「受信任的根证书颁发机构」
-        6. 点击确定，完成证书安装
+        $ErrorActionPreference = "Stop"
+        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
         
-        ### 2. 安装应用
-        1. 进入 `AppxPackages` 文件夹
-        2. 找到 `.msixbundle` 文件，双击安装
+        # 检查管理员权限
+        $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
         
-        ## 注意事项
-        - 证书只需在每台电脑上安装一次
-        - 每次更新应用时，直接安装新的 .msixbundle 即可
-        - 此版本为个人构建，部分功能（Bing Maps、GitHub 登录等）不可用
+        if (-not $isAdmin) {
+            Write-Host "需要管理员权限，正在请求..." -ForegroundColor Yellow
+            Start-Process PowerShell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`""
+            exit
+        }
         
-        ## 卸载
-        在 Windows 设置 > 应用 中找到「Files (Personal)」并卸载
-        "@
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "   Files Personal Build 安装程序" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host ""
         
-        $instructions | Out-File -FilePath "$env:ARTIFACTS_STAGING_DIR\安装说明.txt" -Encoding UTF8
+        # 查找证书和安装包
+        $certFile = Get-ChildItem -Path $scriptDir -Filter "*.cer" | Select-Object -First 1
+        $msixBundle = Get-ChildItem -Path $scriptDir -Recurse -Filter "*.msixbundle" | Select-Object -First 1
+        
+        if (-not $certFile) {
+            Write-Host "错误: 找不到证书文件 (.cer)" -ForegroundColor Red
+            pause
+            exit 1
+        }
+        
+        if (-not $msixBundle) {
+            Write-Host "错误: 找不到安装包 (.msixbundle)" -ForegroundColor Red
+            pause
+            exit 1
+        }
+        
+        # 步骤 1: 安装证书
+        Write-Host "[1/2] 安装证书..." -ForegroundColor Green
+        try {
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certFile.FullName)
+            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
+            $store.Open("ReadWrite")
+            
+            # 检查证书是否已安装
+            $existing = $store.Certificates | Where-Object { $_.Thumbprint -eq $cert.Thumbprint }
+            if ($existing) {
+                Write-Host "  证书已安装，跳过" -ForegroundColor Gray
+            } else {
+                $store.Add($cert)
+                Write-Host "  证书安装成功!" -ForegroundColor Green
+            }
+            $store.Close()
+        } catch {
+            Write-Host "  证书安装失败: $_" -ForegroundColor Red
+            pause
+            exit 1
+        }
+        
+        # 步骤 2: 安装应用
+        Write-Host "[2/2] 安装应用..." -ForegroundColor Green
+        try {
+            Add-AppxPackage -Path $msixBundle.FullName
+            Write-Host "  应用安装成功!" -ForegroundColor Green
+        } catch {
+            Write-Host "  应用安装失败: $_" -ForegroundColor Red
+            pause
+            exit 1
+        }
+        
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "   安装完成! 可以在开始菜单找到 Files" -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "按任意键退出..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        '@
+        
+        $installScript | Out-File -FilePath "$env:ARTIFACTS_STAGING_DIR\Install.ps1" -Encoding UTF8
+        
+        # 创建简单的 readme
+        $readme = @"
+Files Personal Build
+====================
+
+安装方法：
+  右键点击 Install.ps1 -> 使用 PowerShell 运行
+
+卸载方法：
+  Windows 设置 -> 应用 -> 找到 "Files (Personal)" -> 卸载
+
+注意：此为个人构建版本，部分在线功能不可用。
+"@
+        $readme | Out-File -FilePath "$env:ARTIFACTS_STAGING_DIR\README.txt" -Encoding UTF8
 
     - name: Remove empty files
       shell: bash
